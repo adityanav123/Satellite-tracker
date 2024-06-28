@@ -161,7 +161,7 @@ def get_coordinates_from_user():
 
 # FILE PATHS
 sats_input_tle = "./Data/30sats.txt"
-sats_output_tle = "./Data/30sats_output.txt"
+sats_output_tle = "./Data/30sats_output_master.txt"
 ##
 
 # Main
