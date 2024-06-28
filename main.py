@@ -1,7 +1,10 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from sgp4.api import Satrec, WGS84, jday
 from pyproj import Transformer
 import pyproj
+import concurrent.futures
 
 
 # converting data to lat-long
@@ -20,7 +23,6 @@ def ecef2lla(pos_x, pos_y, pos_z):
 def ecef2lla_ver2(pos_x, pos_y, pos_z):
     transformer = Transformer.from_crs("EPSG:4978", "EPSG:4979")
     lon, lat, alt = transformer.transform(pos_x, pos_y, pos_z, radians=False)
-
     return lon, lat, alt
 
 
@@ -29,7 +31,7 @@ class SatelliteInfo:
         self.name = name
         self.satrec = Satrec.twoline2rv(line_1, line_2, WGS84)
 
-    # DEBUG
+    # Verbose
     def get_name(self):
         return self.name
 
@@ -53,8 +55,8 @@ class SatelliteTracker:
 
     # DEBUG
     def show_satellite_names(self):
-        for sat in self.satellites:
-            print(f'sat= {sat.get_name()}')
+        for curr_satellite in self.satellites:
+            print(f'sat= {curr_satellite.get_name()}')
 
     # parsing the file
     def parse_file(self, file_path):
@@ -71,7 +73,6 @@ class SatelliteTracker:
                 satellite_name = lines[idx].strip()
                 line_1 = lines[idx + 1].strip()
                 line_2 = lines[idx + 2].strip()
-
                 satellites.append(SatelliteInfo(satellite_name, line_1, line_2))
         return satellites
 
@@ -109,6 +110,36 @@ class SatelliteTracker:
                 curr_time += time_step
         return satellite_data
 
+    # Multithreaded Satellite Track
+    def track_satellite_multithreaded(self, time_start: datetime, time_end: datetime, time_step: datetime):
+        satellite_data = []
+        lock = threading.Lock()
+        num_threads = 10
+
+        def work(satellites):
+            data = []
+            for satellite in satellites:
+                curr_time = time_start
+                while curr_time <= time_end:
+                    try:
+                        pos, vel = satellite.cal_pos_vel(curr_time)
+                        lon, lat, alt = ecef2lla_ver2(pos[0], pos[1], pos[2])
+                        data.append((satellite.get_name(), curr_time, lon, lat, alt, vel[0], vel[1], vel[2]))
+                        curr_time += time_step
+                    except RuntimeError as err:
+                        print(f'Error propagating Satellite {satellite.get_name()} : {str(err)}')
+
+            with lock:
+                satellite_data.extend(data)
+
+        chunks = [self.satellites[i::num_threads] for i in range(num_threads)]
+
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(work, chunk) for chunk in chunks]
+            concurrent.futures.wait(futures)
+
+        return satellite_data
+
     # temp method
     def save_to_file(self, satellite_data, out_file_path: str):
         with open(out_file_path, 'w') as file:
@@ -130,6 +161,7 @@ def lie_inside_rec(lat, lon, rec_coord):
     return check
 
 
+
 def filter_sat_to_rect(satellite_data, user_coord):
     filtered_sat_data = []
 
@@ -139,6 +171,24 @@ def filter_sat_to_rect(satellite_data, user_coord):
             filtered_sat_data.append(data)
     return filtered_sat_data
 
+# Multithreading Version
+def filter_sat_to_rect_multithreaded(satellite_data, user_coord):
+    num_threads = 10
+    def work(chunk):
+        return [data for data in chunk if lie_inside_rec(data[3], data[2], user_coord)]
+
+    chunks = [satellite_data[i::num_threads] for i in range(num_threads)]
+
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(work, chunk) for chunk in chunks]
+        results = [future.result() for future in futures]
+
+    filtered_sat_data = []
+    for sub_lst in results:
+        if sub_lst:
+            filtered_sat_data.extend(sub_lst)
+
+    return filtered_sat_data
 
 # USER input
 def get_coordinates_from_user():
@@ -151,18 +201,12 @@ def get_coordinates_from_user():
         (-21.09096, -119.71009),
         (-31.32309, -147.79778)
     ]
-
-    print(f'coordinates = ')
-    for coord in coordinates:
-        print(f"Latitude: {coord[0]}, Longitude: {coord[1]}")
-
     return coordinates
 
 
 # FILE PATHS
 sats_input_tle = "./Data/30sats.txt"
 sats_output_tle = "./Data/30sats_output.txt"
-##
 
 # Main
 if __name__ == '__main__':
@@ -170,18 +214,18 @@ if __name__ == '__main__':
     end_time = start_time + timedelta(days=1)  # 1 day data
     time_step_ = timedelta(minutes=1)  # 1 minute increment
 
-    # Tracker Start
+    # Tracker Constructed
     sat_tracker = SatelliteTracker(sats_input_tle)
 
     # verbose_debug:
     # sat_tracker.show_satellite_names()
 
     # find pos and vel through the day
-    sat_data = sat_tracker.track_satellite(start_time, end_time, time_step_)
+    sat_data = sat_tracker.track_satellite_multithreaded(start_time, end_time, time_step_)
 
     # filter the data according to the user coordinates
     user_lat_long = get_coordinates_from_user()
-    filter_sat_data = filter_sat_to_rect(sat_data, user_lat_long)
+    filter_sat_data = filter_sat_to_rect_multithreaded(sat_data, user_lat_long)
 
     # Save to file : DEBUG
     sat_tracker.save_to_file(filter_sat_data, sats_output_tle)
